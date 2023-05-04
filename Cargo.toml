@@ -1,0 +1,15 @@
+[package]
+name = "pico"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+embedded-hal = { version = "0.2", features = ["unproven"] }
+usb-device = "0.2"
+usbd-human-interface-device = { version = "0.4.1", features = ["log"] }
+cortex-m-rt = "0.7.3"
+fugit = "0.3.6"
+panic-halt = "0.2.0"
+rp-pico = "0.7.0"
