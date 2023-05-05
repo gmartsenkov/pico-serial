@@ -13,3 +13,8 @@ cortex-m-rt = "0.7.3"
 fugit = "0.3.6"
 panic-halt = "0.2.0"
 rp-pico = "0.7.0"
+serde-json-core = "0.5.0"
+usbd-serial = "0.1.1"
+heapless = { version = "0.7", features = ["serde"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+
