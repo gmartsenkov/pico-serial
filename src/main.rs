@@ -1,25 +1,31 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::{digital::v2::OutputPin, timer::CountDown};
-use fugit::ExtU32;
+use bsp::entry;
+use bsp::hal;
+use defmt::*;
+use defmt_rtt as _;
 use panic_halt as _;
-use rp_pico::{entry, hal};
-use serde::{Deserialize, Serialize};
-use usb_device::{class_prelude::UsbBusAllocator, prelude::*};
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
+use embedded_hal::digital::v2::*;
+use embedded_hal::prelude::*;
+use fugit::ExtU32;
+use hal::pac;
+use pico::pedal::PedalConfig;
+use pico::pedal::PedalReport;
+#[allow(clippy::wildcard_imports)]
+use usb_device::class_prelude::*;
+use usb_device::prelude::*;
+use usbd_human_interface_device::prelude::*;
 
-#[derive(Deserialize, Serialize)]
-struct Config {
-    load_cell_kg: bool,
-}
+use rp_pico as bsp;
 
 #[entry]
 fn main() -> ! {
-    let mut pac = hal::pac::Peripherals::take().unwrap();
+    let mut pac = pac::Peripherals::take().unwrap();
+
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
     let clocks = hal::clocks::init_clocks_and_plls(
-        rp_pico::XOSC_CRYSTAL_FREQ,
+        bsp::XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -29,16 +35,20 @@ fn main() -> ! {
     )
     .ok()
     .unwrap();
+
     let timer = hal::Timer::new(pac.TIMER, &mut pac.RESETS);
 
     let sio = hal::Sio::new(pac.SIO);
-    let pins = rp_pico::Pins::new(
+    let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
 
+    info!("Starting");
+
+    //USB
     let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
@@ -47,84 +57,35 @@ fn main() -> ! {
         &mut pac.RESETS,
     ));
 
-    let mut serial = SerialPort::new(&usb_bus);
+    let mut pedal = UsbHidClassBuilder::new()
+        .add_device(PedalConfig::default())
+        .build(&usb_bus);
 
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0x0001))
         .manufacturer("gogo")
         .product("cool pedals")
         .serial_number("G-CP000X")
-        .device_class(USB_CLASS_CDC)
+        .device_class(0x03)
         .build();
 
     let mut input_count_down = timer.count_down();
     input_count_down.start(1000.millis());
 
-    let mut led_pin = pins.led.into_push_pull_output();
+    let mut led_pin = pins.gpio25.into_push_pull_output();
     led_pin.set_high().unwrap();
 
-    let mut buffer = [0; 64];
-    let mut write_buffer = [0; 64];
-
+    let pedal_report = PedalReport{y: 10};
     loop {
         if input_count_down.wait().is_ok() {
-            match serial.read(&mut buffer[..]) {
-                Ok(_) => {
-                    serial.write(&buffer).ok();
-                    match serde_json_core::de::from_slice::<Config>(&buffer) {
-                        Ok(config) => {
-                            serde_json_core::ser::to_slice(&config, &mut write_buffer).unwrap();
-                            serial.write(&write_buffer).ok()
-                        }
-                        Err(e) => serial.write(json_error_to_str(e).as_bytes()).ok(),
-                    }
+            match pedal.device().write_report(&pedal_report) {
+                Err(UsbHidError::WouldBlock) => {}
+                Ok(_) => {}
+                Err(e) => {
+                    core::panic!("Failed to write joystick report: {:?}", e)
                 }
-                Err(_) => Some(0),
-            };
+            }
         }
 
-        if usb_dev.poll(&mut [&mut serial]) {}
-    }
-}
-
-fn json_error_to_str(e: serde_json_core::de::Error) -> &'static str {
-    match e {
-        serde_json_core::de::Error::EofWhileParsingList => "EOF while parsing a list.",
-        serde_json_core::de::Error::EofWhileParsingObject => "EOF while parsing an object.",
-        serde_json_core::de::Error::EofWhileParsingString => "EOF while parsing a string.",
-        serde_json_core::de::Error::EofWhileParsingValue => "EOF while parsing a JSON value.",
-        serde_json_core::de::Error::ExpectedColon => "Expected this character to be a `':'`.",
-        serde_json_core::de::Error::ExpectedListCommaOrEnd => {
-            "Expected this character to be either a `','` or\
-                     a \
-                     `']'`."
-        }
-        serde_json_core::de::Error::ExpectedObjectCommaOrEnd => {
-            "Expected this character to be either a `','` \
-                     or a \
-                     `'}'`."
-        }
-        serde_json_core::de::Error::ExpectedSomeIdent => {
-            "Expected to parse either a `true`, `false`, or a \
-                     `null`."
-        }
-        serde_json_core::de::Error::ExpectedSomeValue => {
-            "Expected this character to start a JSON value."
-        }
-        serde_json_core::de::Error::InvalidNumber => "Invalid number.",
-        serde_json_core::de::Error::InvalidType => "Invalid type",
-        serde_json_core::de::Error::InvalidUnicodeCodePoint => "Invalid unicode code point.",
-        serde_json_core::de::Error::KeyMustBeAString => "Object key is not a string.",
-        serde_json_core::de::Error::TrailingCharacters => {
-            "JSON has non-whitespace trailing characters after \
-                     the \
-                     value."
-        }
-        serde_json_core::de::Error::TrailingComma => {
-            "JSON has a comma after the last value in an array or map."
-        }
-        serde_json_core::de::Error::CustomError => {
-            "JSON does not match deserializer’s expected format."
-        }
-        _ => unimplemented!()
+        if usb_dev.poll(&mut [&mut pedal]) {}
     }
 }
